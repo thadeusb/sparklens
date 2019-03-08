@@ -18,6 +18,7 @@
 package com.qubole.sparklens
 
 import java.net.URI
+import java.time.Instant
 
 import com.qubole.sparklens.analyzer._
 import com.qubole.sparklens.common.{AggregateMetrics, AppContext, ApplicationInfo}
@@ -29,7 +30,6 @@ import org.apache.spark.scheduler._
 
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
-
 
 /**
   * Created by rohitk on 21/09/17.
@@ -47,6 +47,8 @@ class QuboleJobListener(sparkConf: SparkConf)  extends SparkListener {
   protected val stageIDToJobID   = new mutable.HashMap[Int, Long]
   protected val failedStages     = new ListBuffer[String]
   protected val appMetrics       = new AggregateMetrics()
+
+  private var lastDumpAt: Instant = Instant.now()
 
   private def hostCount():Int = hostMap.size
 
@@ -130,13 +132,20 @@ class QuboleJobListener(sparkConf: SparkConf)  extends SparkListener {
   }
 
   private[this] def dumpData(appContext: AppContext): Unit = {
+    lastDumpAt = Instant.now()
     val dumpDir = getDumpDirectory(sparkConf)
     println(s"Saving sparkLens data to ${dumpDir}")
     val fs = FileSystem.get(new URI(dumpDir), new Configuration())
-    val stream = fs.create(new Path(s"${dumpDir}/${appInfo.applicationID}.sparklens.json"))
+    val stream = fs.create(new Path(s"${dumpDir}/${appInfo.applicationID}.${lastDumpAt.getEpochSecond()}.sparklens.json"))
     val jsonString = appContext.toString
     stream.writeBytes(jsonString)
     stream.close()
+  }
+
+  private[this] def createReport(): Unit = {
+    appInfo.endTime = Instant.now().toEpochMilli()
+    val appContext = new AppContext(appInfo, appMetrics, hostMap, executorMap, jobMap, stageMap, stageIDToJobID)
+    dumpData(appContext)
   }
 
   override def onApplicationStart(applicationStart: SparkListenerApplicationStart): Unit = {
@@ -206,6 +215,10 @@ class QuboleJobListener(sparkConf: SparkConf)  extends SparkListener {
     jobTimeSpan.setEndTime(jobEnd.time)
     //if we miss cleaing up tasks at end of stage, clean them after end of job
     stageMap.map(x => x._2).foreach( x => x.tempTaskTimes.clear())
+
+    if (lastDumpAt.plusSeconds(60l).isBefore(Instant.now())) {
+      createReport()
+    }
   }
 
   override def onStageSubmitted(stageSubmitted: SparkListenerStageSubmitted): Unit = {
